@@ -23,8 +23,15 @@ APP_DB_NAME="${APP_DB_NAME:=newsletter}"
 # Allow to skip Docker if a dockerized Postgres database is already running
 if [[ -z "${SKIP_DOCKER}" ]]
 then
+    # if a postgres container is running, print instructions to kill it and exit
+    RUNNING_POSTGRES_CONTAINERS=$(docker ps --filter 'name=postgres' --format '{{.ID}}')
+    if [[ -n $RUNNING_POSTGRES_CONTAINER ]]; then
+        echo >&2 "there is a postgres container already running, kill it with"
+        echo >&2 "   docker kill ${RUNNING_POSTGRES_CONTAINER}"
+        exit 1
+    fi
+    CONTAINER_NAME="postgres_$(date '+%s')"
     # Launch postgres using Docker
-    CONTAINER_NAME="postgres"
     docker run \
         --env POSTGRES_USER=${SUPERUSER} \
         --env POSTGRES_PASSWORD=${SUPERUSER_PWD} \
@@ -47,8 +54,6 @@ then
         sleep 1
     done
 
-    >&2 echo "Postgres is up and running on port ${DB_PORT}!"
-
     # Create the application user
     CREATE_QUERY="CREATE USER ${APP_USER} WITH PASSWORD '${APP_USER_PWD}';"
     docker exec -it "${CONTAINER_NAME}" psql -U "${SUPERUSER}" -c "${CREATE_QUERY}"
@@ -64,8 +69,6 @@ fi
 DATABASE_URL=postgres://${APP_USER}:${APP_USER_PWD}@localhost:${DB_PORT}/${APP_DB_NAME}
 export DATABASE_URL
 sqlx database create
-# export DATABASE_URL=postgres://app:secret@127.0.0.1:5432/newsletter
-# sqlx migrate add create_subscriptions_table
 sqlx migrate run
 
 >&2 echo "Postgres has been migrated, ready to go!"
