@@ -1,13 +1,14 @@
 //! src/routes/subscriptions.rs
 use crate::domain::{NewSubscriber, SubscriberEmail, SubscriberName};
+use crate::email_client::EmailClient;
+use crate::startup::ApplicationBaseUrl;
 use actix_web::{web, HttpResponse};
 use chrono::Utc;
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 use sqlx::PgPool;
-use uuid::Uuid;
-
-// An extension trait to provide the `graphemes` method
-// on `String` and `&str`
 use unicode_segmentation::UnicodeSegmentation;
+use uuid::Uuid;
 
 #[derive(serde::Deserialize)]
 pub struct FormData {
@@ -33,61 +34,47 @@ pub fn parse_subscriber(form: FormData) -> Result<NewSubscriber, String> {
 
 #[tracing::instrument(
     name = "Adding a new subscriber",
-    skip(form, pool),
+    skip(form, pool, email_client, base_url),
     fields(
         // request_id = %Uuid::new_v4(),
         subscriber_email = %form.email,
         subscriber_name = %form.name
     )
 )]
-pub async fn subscribe(form: web::Form<FormData>, pool: web::Data<PgPool>) -> HttpResponse {
-    // `web::Form` is a wrapper around `FormData`
-    // `form.0` gives us access to the underlying `FormData`
-
-    // let name = match SubscriberName::parse(form.0.name) {
-    //     Ok(name) => name,
-    //     // Return early if the name is invalid, with a 400
-    //     Err(_) => return HttpResponse::BadRequest().finish(),
-    // };
-
-    // let email = match SubscriberEmail::parse(form.0.email) {
-    //     Ok(email) => email,
-    //     Err(_) => return HttpResponse::BadRequest().finish(),
-    // };
-
-    // let new_subcriber = NewSubscriber { email, name };
-    let new_subcriber = match form.0.try_into() {
+pub async fn subscribe(
+    form: web::Form<FormData>,
+    pool: web::Data<PgPool>,
+    email_client: web::Data<EmailClient>,
+    base_url: web::Data<ApplicationBaseUrl>,
+) -> HttpResponse {
+    let new_subscriber = match form.0.try_into() {
         Ok(form) => form,
         Err(_) => return HttpResponse::BadRequest().finish(),
     };
 
-    match insert_subscriber(&pool, &new_subcriber).await {
-        Ok(_) => HttpResponse::Ok().finish(),
-        Err(_) => HttpResponse::InternalServerError().finish(),
+    let subscriber_id = match insert_subscriber(&pool, &new_subscriber).await {
+        Ok(subscriber_id) => subscriber_id,
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+    let subscription_token = generate_subscription_token();
+    if store_token(&pool, subscriber_id, &subscription_token)
+        .await
+        .is_err()
+    {
+        return HttpResponse::InternalServerError().finish();
     }
-}
-
-pub fn is_valid_name(s: &str) -> bool {
-    // `.trim()` returns a view over the input `s` without trailing
-    // whitespace-like characters.
-    // `.is_empty` checks if the view contains any character.
-    let is_empty_or_whitespace = s.trim().is_empty();
-
-    // A grapheme is defined by the Unicode standard as a "user-perceived"
-    // character: `å` is a single grapheme, but it is composed of two characters
-    // (`a` and `̊`).
-    //
-    // `graphemes` returns an iterator over the graphemes in the input `s`.
-    // `true` specifies that we want to use the extended grapheme definition set,
-    // the recommended one.
-    let is_too_long = s.graphemes(true).count() > 256;
-
-    // Iterate over all characters in the input `s` to check if any of them matches
-    // one of the characters in the forbidden array.
-    let forbidden_characters = ['/', '(', ')', '"', '<', '>', '\\', '{', '}'];
-    let contains_forbidden_characters = s.chars().any(|g| forbidden_characters.contains(&g));
-
-    !(is_empty_or_whitespace || is_too_long || contains_forbidden_characters)
+    if send_confirmation_email(
+        &email_client,
+        new_subscriber,
+        &base_url.0,
+        &subscription_token,
+    )
+    .await
+    .is_err()
+    {
+        return HttpResponse::InternalServerError().finish();
+    }
+    HttpResponse::Ok().finish()
 }
 
 #[tracing::instrument(
@@ -97,16 +84,88 @@ pub fn is_valid_name(s: &str) -> bool {
 pub async fn insert_subscriber(
     pool: &PgPool,
     new_subscriber: &NewSubscriber,
-) -> Result<(), sqlx::Error> {
+) -> Result<Uuid, sqlx::Error> {
+    let subscriber_id = Uuid::new_v4();
     sqlx::query!(
         r#"
-    INSERT INTO subscriptions (id, email, name, subscribed_at)
-    VALUES ($1, $2, $3, $4)
+    INSERT INTO subscriptions (id, email, name, subscribed_at, status)
+    VALUES ($1, $2, $3, $4, 'pending_confirmation')
             "#,
-        Uuid::new_v4(),
+        subscriber_id,
         new_subscriber.email.as_ref(),
         new_subscriber.name.as_ref(),
-        Utc::now()
+        Utc::now(),
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to execute query: {:?}", e);
+        e
+    })?;
+    Ok(subscriber_id)
+}
+
+#[tracing::instrument(
+    name = "Send a confirmation email to a new subscriber",
+    skip(email_client, new_subscriber)
+)]
+pub async fn send_confirmation_email(
+    email_client: &EmailClient,
+    new_subscriber: NewSubscriber,
+    base_url: &str,
+    subscription_token: &str,
+) -> Result<(), reqwest::Error> {
+    let confirmation_link = format!(
+        "{}/subscriptions/confirm?subscription_token={}",
+        base_url, subscription_token
+    );
+    let plain_body = format!(
+        "Welcome to our newsletter!\nVisit {} to confirm your subscription.",
+        confirmation_link
+    );
+    let html_body = format!(
+        "Welcome to our newsletter!<br />\
+        Click <a href=\"{}\">here</a> to confirm your subscription.",
+        confirmation_link
+    );
+    email_client
+        .send_email(new_subscriber.email, "Welcome!", &html_body, &plain_body)
+        .await
+}
+
+pub fn is_valid_name(s: &str) -> bool {
+    let is_empty_or_whitespace = s.trim().is_empty();
+    let is_too_long = s.graphemes(true).count() > 256;
+
+    let forbidden_characters = ['/', '(', ')', '"', '<', '>', '\\', '{', '}'];
+    let contains_forbidden_characters = s.chars().any(|g| forbidden_characters.contains(&g));
+
+    !(is_empty_or_whitespace || is_too_long || contains_forbidden_characters)
+}
+
+/// Generate a random 25-characters-long case-sensitive subscription token.
+fn generate_subscription_token() -> String {
+    let mut rng = thread_rng();
+    std::iter::repeat_with(|| rng.sample(Alphanumeric))
+        .map(char::from)
+        .take(25)
+        .collect()
+}
+
+#[tracing::instrument(
+    name = "Store subscription token in the database",
+    skip(subscription_token, pool)
+)]
+pub async fn store_token(
+    pool: &PgPool,
+    subscriber_id: Uuid,
+    subscription_token: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"INSERT INTO subscription_tokens (subscription_token, subscriber_id)
+        VALUES ($1, $2)"#,
+        subscription_token,
+        subscriber_id
     )
     .execute(pool)
     .await
