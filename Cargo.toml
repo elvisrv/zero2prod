@@ -29,6 +29,8 @@ serde-aux = "4"
 unicode-segmentation = "1"
 validator = "0.18"
 rand = { version = "0.8", features = ["std_rng"] }
+thiserror = "1"
+anyhow = "1"
 
 [dev-dependencies]
 claims = "0.7"

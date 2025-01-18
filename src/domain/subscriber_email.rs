@@ -7,7 +7,6 @@ pub struct SubscriberEmail(String);
 
 impl SubscriberEmail {
     pub fn parse(s: String) -> Result<SubscriberEmail, String> {
-        // TODO: add validation!
         if s.validate_email() {
             Ok(Self(s))
         } else {
