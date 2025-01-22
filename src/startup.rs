@@ -1,6 +1,5 @@
 //! src/startup.rs
-use crate::configuration::DatabaseSettings;
-use crate::configuration::Settings;
+use crate::configuration::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
 use crate::routes::{confirm, health_check, publish_newsletter, subscribe};
 use actix_web::dev::Server;
