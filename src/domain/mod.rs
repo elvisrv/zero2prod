@@ -1,5 +1,4 @@
 //! src/domain/mod.rs
-
 mod new_subscriber;
 mod subscriber_email;
 mod subscriber_name;

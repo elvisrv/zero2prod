@@ -1,5 +1,4 @@
 //! src/configuration.rs
-// use config::Environment;
 use crate::domain::SubscriberEmail;
 use secrecy::ExposeSecret;
 use secrecy::Secret;
@@ -11,8 +10,8 @@ use sqlx::postgres::PgSslMode;
 pub struct Settings {
     pub database: DatabaseSettings,
     pub application: ApplicationSettings,
-    // New field
     pub email_client: EmailClientSettings,
+    pub redis_uri: Secret<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]

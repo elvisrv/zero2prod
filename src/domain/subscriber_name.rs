@@ -1,5 +1,4 @@
 //! src/domain/subscriber_name.rs
-
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Debug)]
