@@ -101,7 +101,7 @@ mod tests {
     }
 
     /// Get a test instance of `EmailClient`
-    fn email_client(base_url: String) -> EmailClient {
+    fn _email_client(base_url: String) -> EmailClient {
         EmailClient::new(
             base_url,
             email(),
